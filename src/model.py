@@ -2,6 +2,8 @@
 Todo:
 - finish implementing the MoPeA module for multi-head
 - consider giving mem linear bias by appending 1 to x
+- do jit compilation
+- make serial inference
 - pray to the weight normalization gods that the matrix states do not aim for the heavens
 """
 
