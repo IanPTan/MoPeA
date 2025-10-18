@@ -1,5 +1,6 @@
 """
 Todo:
+- add lerp to the linear block
 - finish implementing the MoPeA module for multi-head
 - consider giving mem linear bias by appending 1 to x
 - do jit compilation
@@ -36,6 +37,12 @@ def mem_scan(all_dA, all_dB, all_R, all_W, last_A=0, last_B=0):
 
 def s(x):
     return pt.where(x >= 0, x + 1, 1 / (1 - x))
+
+
+def stable_max(x):
+    x = s(x)
+    y = x / pt.sum(x, dim=-1, keepdim=True)
+    return y
 
 
 class LerpLinear(nn.Module):
@@ -163,6 +170,7 @@ class MoPeAModel(nn.Module):
         
         x = self.layer_norm2(x)
         y = self.out_linear(x)
+        y = stable_max(y)
 
         return y
 
