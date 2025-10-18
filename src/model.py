@@ -33,11 +33,8 @@ def mem_scan(all_dA, all_dB, all_R, all_W, last_A=0, last_B=0):
 
 
 def s(x):
-    upper_mask = x >= 0
-    lower_mask = x < 0
-    upper = x + 1
-    lower = 1 / (1 - x)
-    return upper * upper_mask + lower * lower_mask
+    return pt.where(x >= 0, x + 1, 1 / (1 - x))
+
 
 class LerpLinear(nn.Module):
     def __init__(self, in_features, out_features, branches=4):
@@ -64,7 +61,7 @@ class LerpLinear(nn.Module):
         return out
 
 
-class MoPeA(nn.Module):
+class MoPeAttention(nn.Module):
     def __init__(self, in_features, mem_features=None, heads=1, min_r=0.99):
         super().__init__()
         
@@ -110,9 +107,63 @@ class MoPeA(nn.Module):
         # m = A_in_features
         memory = pt.einsum("ijkl, ijlm -> ijkm", B, pt.linalg.inv(A))
         out_x = pt.einsum("ijkm, ijm -> ijk", memory, q)
+
         dx = self.out_linear(out_x)
+        y = x + dx
+
+        return y, A[:, -1], B[:, -1]
+
+
+class Block(nn.Module):
+    def __init__(self, in_features, mem_features=None, heads=1, min_r=0.99):
+        super().__init__()
         
-        return x + dx, A[:, -1], B[:, -1]
+        self.mopea_layer = MoPeAttention(in_features, mem_features, heads, min_r)
+
+        self.linear_block = nn.Sequential(
+            nn.LayerNorm(in_features),
+            nn.Linear(in_features, in_features),
+            nn.GELU(),
+            nn.Linear(in_features, in_features)
+        )
+
+    def forward(self, x, last_x=0, last_A=0, last_B=0):
+        
+        x, A, B = self.mopea_layer(x, last_x, last_A, last_B)
+
+        dx = self.linear_block(x)
+        y = x + dx
+        
+        return y, A[:, -1], B[:, -1]
+
+
+class MoPeAModel(nn.Module):
+    def __init__(self, in_features, mid_features, out_features, mem_features=None, heads=1, min_r=0.99, depth=1):
+        super().__init__()
+
+        self.in_linear = nn.Linear(in_features, mid_features)
+        self.layer_norm1 = nn.LayerNorm(mid_features)
+        self.layer_norm2 = nn.LayerNorm(mid_features)
+        self.out_linear = nn.Linear(mid_features, out_features)
+
+        self.blocks = nn.ModuleList([
+            Block(mid_features, mem_features, heads, min_r)
+            for _ in range(depth)
+        ])
+
+    def forward(self, x):
+        
+        x = self.in_linear(x)
+        x = self.layer_norm1(x)
+
+        for block in self.blocks:
+            x, _, _ = block(x)
+        
+        x = self.layer_norm2(x)
+        y = self.out_linear(x)
+
+        return y
+
         
 
 if __name__ == "__main__":
@@ -123,6 +174,15 @@ if __name__ == "__main__":
     qkv = qkv_layer(x, last_x)
     print(f"LerpLinear\n\toutput shape: {qkv.shape}\n")
 
-    mopea = MoPeA(8, 4)
+    mopea = MoPeAttention(8, 4)
     y, A, B = mopea(x)
-    print(f"MoPeA\n\toutput shape: {y.shape}\n\tA shape: {A.shape}\n\tB shape: {B.shape}")
+    print(f"MoPeAttention\n\toutput shape: {y.shape}\n\tA shape: {A.shape}\n\tB shape: {B.shape}\n")
+    
+    block = Block(8, 4)
+    y, A, B = block(x)
+    print(f"Block\n\toutput shape: {y.shape}\n\tA shape: {A.shape}\n\tB shape: {B.shape}\n")
+
+    mopea_model = MoPeAModel(8, 16, 8, 4, depth=2)
+    y = mopea_model(x)
+    print(f"MoPeA Model\n\toutput shape: {y.shape}\n")
+    
