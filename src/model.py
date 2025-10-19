@@ -31,8 +31,33 @@ def mem_scan(all_dA, all_dB, all_R, all_W, last_A=0, last_B=0):
         
         A[i] = last_A
         B[i] = last_B
-
+    
     return A, B
+
+
+def get_mem(k, v, r, w, last_A=0, last_B=0):
+    r_k, r_v = pt.split(r, r.shape[-1] // 2, dim=-1)
+    w_k, w_v = pt.split(w, w.shape[-1] // 2, dim=-1)
+
+    # i = batch
+    # j = time
+    # k = key_features
+    # l = value_features
+    dA = pt.einsum("ijk, ijl -> ijkl", k, k)
+    dB = pt.einsum("ijk, ijl -> ijkl", v, k)
+    R = pt.einsum("ijk, ijl -> ijkl", r_v, r_k)
+    W = pt.einsum("ijk, ijl -> ijkl", w_v, w_k)
+    
+    A, B = mem_scan(dA, dB, R, W, last_A, last_B)
+
+    # i = batch
+    # j = time
+    # k = B_out_features
+    # l = common
+    # m = A_in_features
+    memory = pt.einsum("ijkl, ijlm -> ijkm", B, pt.linalg.inv(A))
+    
+    return memory, A, B
 
 
 def s(x):
@@ -95,26 +120,8 @@ class MoPeAttention(nn.Module):
         r = self.min_r + (1 - self.min_r) * pt.nn.functional.sigmoid(r)
         w = s(w)
 
-        r_k, r_v = pt.split(r, r.shape[-1] // 2, dim=-1)
-        w_k, w_v = pt.split(w, w.shape[-1] // 2, dim=-1)
+        memory, A, B = get_mem(k, v, r, w, last_A, last_B)
 
-        # i = batch
-        # j = time
-        # k = key_features
-        # l = value_features
-        dA = pt.einsum("ijk, ijl -> ijkl", k, k)
-        dB = pt.einsum("ijk, ijl -> ijkl", v, k)
-        R = pt.einsum("ijk, ijl -> ijkl", r_v, r_k)
-        W = pt.einsum("ijk, ijl -> ijkl", w_v, w_k)
-        
-        A, B = mem_scan(dA, dB, R, W, last_A, last_B)
-
-        # i = batch
-        # j = time
-        # k = B_out_features
-        # l = common
-        # m = A_in_features
-        memory = pt.einsum("ijkl, ijlm -> ijkm", B, pt.linalg.inv(A))
         out_x = pt.einsum("ijkm, ijm -> ijk", memory, q)
 
         dx = self.out_linear(out_x)
@@ -165,15 +172,18 @@ class MoPeAModel(nn.Module):
         x = self.in_linear(x)
         x = self.layer_norm1(x)
 
+        A = []
+        B = []
         for block in self.blocks:
-            x, _, _ = block(x)
+            x, block_A, block_B = block(x)
+            A.append(block_A)
+            B.append(block_B)
         
         x = self.layer_norm2(x)
         y = self.out_linear(x)
         y = stable_max(y)
 
-        return y
-
+        return y, A, B
         
 
 if __name__ == "__main__":
@@ -193,6 +203,5 @@ if __name__ == "__main__":
     print(f"Block\n\toutput shape: {y.shape}\n\tA shape: {A.shape}\n\tB shape: {B.shape}\n")
 
     mopea_model = MoPeAModel(8, 16, 8, 4, depth=2)
-    y = mopea_model(x)
+    y, A, B = mopea_model(x)
     print(f"MoPeA Model\n\toutput shape: {y.shape}\n")
-    
