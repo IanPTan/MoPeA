@@ -25,12 +25,17 @@ def mem_scan(all_dA, all_dB, all_R, all_W, last_A=0, last_B=0):
     A = pt.zeros_like(all_dA)
     B = pt.zeros_like(all_dB)
 
-    for i, (dA, dB, R, W) in enumerate(zip(all_dA, all_dB, all_R, all_W)):
+    for i in range(all_dA.shape[1]):
+        dA = all_dA[:, i]
+        dB = all_dB[:, i]
+        R = all_R[:, i]
+        W = all_W[:, i]
+
         last_A = last_A * R + dA * W
         last_B = last_B * R + dB * W
         
-        A[i] = last_A
-        B[i] = last_B
+        A[:, i] = last_A
+        B[:, i] = last_B
     
     return A, B
 
@@ -41,8 +46,8 @@ def get_mem(k, v, r, w, last_A=0, last_B=0):
 
     # i = batch
     # j = time
-    # k = key_features
-    # l = value_features
+    # k = value_features
+    # l = key_features
     dA = pt.einsum("ijk, ijl -> ijkl", k, k)
     dB = pt.einsum("ijk, ijl -> ijkl", v, k)
     R = pt.einsum("ijk, ijl -> ijkl", r_v, r_k)
