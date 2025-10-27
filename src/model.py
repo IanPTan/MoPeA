@@ -13,6 +13,16 @@ import torch as pt
 from torch import nn
 
 
+def s(x):
+    return pt.where(x >= 0, x + 1, 1 / (1 - x))
+
+
+def stable_max(x, dim=-1):
+    x = s(x)
+    y = x / pt.sum(x, dim=dim, keepdim=True)
+    return y
+
+
 def add_last_x(x, last_x=0):
     zeros_shape = x.shape[:-2] + (1,) + (x.shape[-1],)
     zeros_padding = x.new_zeros(zeros_shape)
@@ -65,14 +75,33 @@ def get_mem(k, v, r, w, last_A=0, last_B=0):
     return memory, A, B
 
 
-def s(x):
-    return pt.where(x >= 0, x + 1, 1 / (1 - x))
+def get_mopea(q, k, v, r, w, last_A=0, last_B=0):
+    memory, A, B = get_mem(k, v, r, w, last_A, last_B)
+    out_x = pt.einsum("ijkm, ijm -> ijk", memory, q)
+    return out_x, A, B
 
 
-def stable_max(x):
-    x = s(x)
-    y = x / pt.sum(x, dim=-1, keepdim=True)
-    return y
+def get_qkva(q, k, v, m=0.1):
+    q_len = q.shape[1]
+    cols = pt.arange(q_len, device=q.device)[None, :]
+    rows = pt.arange(q_len, device=q.device)[:, None]
+    pos_bias = (cols - rows) * m
+
+    # i = batch
+    # j = q time
+    # k = k time
+    # l = features
+    attention_matrix = pt.einsum("ijl, ikl -> ijk", q, k)
+    attention_matrix = attention_matrix / q.shape[-1] ** 0.5 + pos_bias
+    attention_matrix = pt.tril(attention_matrix)
+    attention_matrix = stable_max(attention_matrix)
+    
+    # i = batch
+    # j = q time
+    # k = k time
+    # l = v features
+    retrieved_v = pt.einsum("ijk, ikl -> ijl", attention_matrix, v)
+    return retrieved_v
 
 
 class LerpLinear(nn.Module):
@@ -124,15 +153,20 @@ class MoPeAttention(nn.Module):
         r, w = self.rw_layer(norm_curr_x, norm_last_x)
         r = self.min_r + (1 - self.min_r) * pt.nn.functional.sigmoid(r)
         w = s(w)
-
-        memory, A, B = get_mem(k, v, r, w, last_A, last_B)
-
-        out_x = pt.einsum("ijkm, ijm -> ijk", memory, q)
+        
+        mope_out_x, A, B = get_mopea(q, k, v, r, w, last_A, last_B)
+        qkv_out_x = get_qkva(q, k, v)
+        mem_loss = pt.mean((mope_out_x - qkv_out_x) ** 2)
+        out_x = qkv_out_x
+        """
+        out_x = get_qkva(q, k, v)
+        mem_loss = 0
+        """
 
         dx = self.out_linear(out_x)
         y = x + dx
 
-        return y, A[:, -1], B[:, -1]
+        return y, A[:, -1], B[:, -1], mem_loss
 
 
 class Block(nn.Module):
@@ -150,12 +184,12 @@ class Block(nn.Module):
 
     def forward(self, x, last_x=0, last_A=0, last_B=0):
         
-        x, A, B = self.mopea_layer(x, last_x, last_A, last_B)
+        x, A, B, mem_loss = self.mopea_layer(x, last_x, last_A, last_B)
 
         dx = self.linear_block(x)
         y = x + dx
         
-        return y, A[:, -1], B[:, -1]
+        return y, A[:, -1], B[:, -1], mem_loss
 
 
 class MoPeAModel(nn.Module):
@@ -180,7 +214,7 @@ class MoPeAModel(nn.Module):
         A = []
         B = []
         for block in self.blocks:
-            x, block_A, block_B = block(x)
+            x, block_A, block_B, mem_loss = block(x)
             A.append(block_A)
             B.append(block_B)
         
@@ -188,7 +222,7 @@ class MoPeAModel(nn.Module):
         y = self.out_linear(x)
         y = stable_max(y)
 
-        return y, A, B
+        return y, A, B, mem_loss
         
 
 if __name__ == "__main__":
