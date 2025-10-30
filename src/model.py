@@ -56,9 +56,9 @@ def mem_scan(all_dC_kk, all_dC_vk, all_dC_vv, all_R_kk, all_R_vk, all_R_vv, last
         R_vv = all_R_vv[:, i]
         #R = 1  # temporarily let's ignore R for now
 
-        last_C_kk = last_C_kk * R_kk + dC_kk
-        last_C_vk = last_C_vk * R_vk + dC_vk
-        last_C_vv = last_C_vv * R_vv + dC_vv
+        last_C_kk = last_C_kk + (dC_kk - last_C_kk) * R_kk
+        last_C_vk = last_C_vk + (dC_vk - last_C_vk) * R_vk
+        last_C_vv = last_C_vv + (dC_vv - last_C_vv) * R_vv
         
         C_kk[:, i] = last_C_kk
         C_vk[:, i] = last_C_vk
