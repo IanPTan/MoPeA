@@ -13,6 +13,17 @@ import torch as pt
 from torch import nn
 
 
+def mean_trace(tensor):
+    diagonal = pt.diagonal(tensor, dim1=-2, dim2=-1)
+    traces = pt.sum(diagonal, dim=-1)
+    return traces.mean()
+
+
+def sum_trace(tensor):
+    diagonal = pt.diagonal(tensor, dim1=-2, dim2=-1)
+    return diagonal.sum()
+
+
 def s(x):
     return pt.where(x >= 0, x + 1, 1 / (1 - x))
 
@@ -31,54 +42,69 @@ def add_last_x(x, last_x=0):
     return cat_x
 
 
-def mem_scan(all_dA, all_dB, all_R, all_W, last_A=0, last_B=0):
-    A = pt.zeros_like(all_dA)
-    B = pt.zeros_like(all_dB)
+def mem_scan(all_dC_kk, all_dC_vk, all_dC_vv, all_R_kk, all_R_vk, all_R_vv, last_C_kk=0, last_C_vk=0, last_C_vv=0):
+    C_kk = pt.zeros_like(all_dC_kk)
+    C_vk = pt.zeros_like(all_dC_vk)
+    C_vv = pt.zeros_like(all_dC_vv)
 
-    for i in range(all_dA.shape[1]):
-        dA = all_dA[:, i]
-        dB = all_dB[:, i]
-        R = all_R[:, i]
-        W = all_W[:, i]
+    for i in range(all_dC_kk.shape[1]):
+        dC_kk = all_dC_kk[:, i]
+        dC_vk = all_dC_vk[:, i]
+        dC_vv = all_dC_vv[:, i]
+        R_kk = all_R_kk[:, i]
+        R_vk = all_R_vk[:, i]
+        R_vv = all_R_vv[:, i]
+        #R = 1  # temporarily let's ignore R for now
 
-        last_A = last_A * R + dA * W
-        last_B = last_B * R + dB * W
+        last_C_kk = last_C_kk * R_kk + dC_kk
+        last_C_vk = last_C_vk * R_vk + dC_vk
+        last_C_vv = last_C_vv * R_vv + dC_vv
         
-        A[:, i] = last_A
-        B[:, i] = last_B
+        C_kk[:, i] = last_C_kk
+        C_vk[:, i] = last_C_vk
+        C_vv[:, i] = last_C_vv
     
-    return A, B
+    return C_kk, C_vk, C_vv
 
 
-def get_mem(k, v, r, w, last_A=0, last_B=0):
+def get_mem(k, v, r, last_C_kk=0, last_C_vk=0, last_C_vv=0):
     r_k, r_v = pt.split(r, r.shape[-1] // 2, dim=-1)
-    w_k, w_v = pt.split(w, w.shape[-1] // 2, dim=-1)
 
     # i = batch
     # j = time
-    # k = value_features
-    # l = key_features
-    dA = pt.einsum("ijk, ijl -> ijkl", k, k)
-    dB = pt.einsum("ijk, ijl -> ijkl", v, k)
-    R = pt.einsum("ijk, ijl -> ijkl", r_v, r_k)
-    W = pt.einsum("ijk, ijl -> ijkl", w_v, w_k)
+    # k = features_1
+    # l = features_2
+    dC_kk = pt.einsum("ijk, ijl -> ijkl", k, k)
+    dC_vk = pt.einsum("ijk, ijl -> ijkl", v, k)
+    dC_vv = pt.einsum("ijk, ijl -> ijkl", v, v)
+    R_kk = pt.einsum("ijk, ijl -> ijkl", r_k, r_k)
+    R_vk = pt.einsum("ijk, ijl -> ijkl", r_v, r_k)
+    R_vv = pt.einsum("ijk, ijl -> ijkl", r_v, r_v)
     
-    A, B = mem_scan(dA, dB, R, W, last_A, last_B)
+    C_kk, C_vk, C_vv = mem_scan(dC_kk, dC_vk, dC_vv, R_kk, R_vk, R_vv, last_C_kk, last_C_vk, last_C_vv)
 
     # i = batch
     # j = time
     # k = B_out_features
     # l = common
     # m = A_in_features
-    memory = pt.einsum("ijkl, ijlm -> ijkm", B, pt.linalg.inv(A))
+    memory = pt.einsum("ijkl, ijlm -> ijkm", C_vk, pt.linalg.inv(C_kk))
     
-    return memory, A, B
+    # i = batch
+    # j = time
+    # k = memory cols
+    # l = memory rows
+    # m = value features
+    mpi_loss = pt.abs(mean_trace(C_vv - pt.einsum("ijkl, ijml -> ijkm", memory, C_vk)))
+    #mpi_loss = sum_trace(C_vv) - 2 * sum_trace(pt.einsum("ijkl, ijmn -> ijkm", memory, C_vk)) + sum_trace(pt.einsum("ijkl, ijlm, ijnm -> ij", memory, C_kk, memory))
+    
+    return memory, C_kk, C_vk, C_vv, mpi_loss
 
 
-def get_mopea(q, k, v, r, w, last_A=0, last_B=0):
-    memory, A, B = get_mem(k, v, r, w, last_A, last_B)
+def get_mopea(q, k, v, r, last_C_kk=0, last_C_vk=0, last_C_vv=0):
+    memory, C_kk, C_vk, C_vv, mpi_loss = get_mem(k, v, r, last_C_kk, last_C_vk, last_C_vv)
     out_x = pt.einsum("ijkm, ijm -> ijk", memory, q)
-    return out_x, A, B
+    return out_x, C_kk, C_vk, C_vv, mpi_loss
 
 
 def get_qkva(q, k, v, m=0.1):
@@ -130,19 +156,20 @@ class LerpLinear(nn.Module):
 
 
 class MoPeAttention(nn.Module):
-    def __init__(self, in_features, mem_features=None, heads=1, min_r=0.99):
+    def __init__(self, in_features, mem_features=None, heads=1, r_range=(0.1, 0.99)):
         super().__init__()
         
         if mem_features is None:
             mem_features = in_features
-        self.min_r = min_r
+        r_min, r_max = r_range
+        self.r_scale = lambda x: r_min + (r_max - r_min) * x
 
         self.layer_norm = nn.LayerNorm(in_features)
         self.qkv_layer = LerpLinear(in_features, mem_features, 3)
-        self.rw_layer = LerpLinear(in_features, 2 * mem_features, 2)
+        self.r_layer = LerpLinear(in_features, 2 * mem_features, 1)
         self.out_linear = nn.Linear(mem_features, in_features)
 
-    def forward(self, x, last_x=0, last_A=0, last_B=0):
+    def forward(self, x, last_x=0, last_C_kk=0, last_C_vk=0, last_C_vv=0):
         cat_x = add_last_x(x, last_x)
         norm_x = self.layer_norm(cat_x)
 
@@ -150,30 +177,30 @@ class MoPeAttention(nn.Module):
         norm_curr_x = norm_x[:, 1:]
 
         q, k, v = self.qkv_layer(norm_curr_x, norm_last_x)
-        r, w = self.rw_layer(norm_curr_x, norm_last_x)
-        r = self.min_r + (1 - self.min_r) * pt.nn.functional.sigmoid(r)
-        w = s(w)
+        (r,) = self.r_layer(norm_curr_x, norm_last_x)
+        r = self.r_scale(r)
         
-        mope_out_x, A, B = get_mopea(q, k, v, r, w, last_A, last_B)
+        mope_out_x, C_kk, C_vk, C_vv, mpi_loss = get_mopea(q, k, v, r, last_C_kk, last_C_vk, last_C_vv)
+        """
         qkv_out_x = get_qkva(q, k, v)
         mem_loss = pt.mean((mope_out_x - qkv_out_x) ** 2)
         out_x = qkv_out_x
-        """
-        out_x = get_qkva(q, k, v)
         mem_loss = 0
         """
+        out_x = mope_out_x
+        mem_loss = mpi_loss
 
         dx = self.out_linear(out_x)
         y = x + dx
 
-        return y, A[:, -1], B[:, -1], mem_loss
+        return y, C_kk[:, -1], C_vk[:, -1], C_vv[:, -1], mem_loss
 
 
 class Block(nn.Module):
-    def __init__(self, in_features, mem_features=None, heads=1, min_r=0.99):
+    def __init__(self, in_features, mem_features=None, heads=1, r_range=(0.1, 0.99)):
         super().__init__()
         
-        self.mopea_layer = MoPeAttention(in_features, mem_features, heads, min_r)
+        self.mopea_layer = MoPeAttention(in_features, mem_features, heads, r_range)
 
         self.linear_block = nn.Sequential(
             nn.LayerNorm(in_features),
@@ -182,18 +209,18 @@ class Block(nn.Module):
             nn.Linear(in_features, in_features)
         )
 
-    def forward(self, x, last_x=0, last_A=0, last_B=0):
+    def forward(self, x, last_x=0, last_C_kk=0, last_C_vk=0, last_C_vv=0):
         
-        x, A, B, mem_loss = self.mopea_layer(x, last_x, last_A, last_B)
+        x, C_kk, C_vk, C_vv, mem_loss = self.mopea_layer(x, last_x, last_C_kk, last_C_vk, last_C_vv)
 
         dx = self.linear_block(x)
         y = x + dx
         
-        return y, A[:, -1], B[:, -1], mem_loss
+        return y, C_kk, C_vk, C_vv, mem_loss
 
 
 class MoPeAModel(nn.Module):
-    def __init__(self, in_features, mid_features, out_features, mem_features=None, heads=1, min_r=0.99, depth=1):
+    def __init__(self, in_features, mid_features, out_features, mem_features=None, heads=1, r_range=(0.1, 0.99), depth=1):
         super().__init__()
 
         self.in_linear = nn.Linear(in_features, mid_features)
@@ -202,7 +229,7 @@ class MoPeAModel(nn.Module):
         self.out_linear = nn.Linear(mid_features, out_features)
 
         self.blocks = nn.ModuleList([
-            Block(mid_features, mem_features, heads, min_r)
+            Block(mid_features, mem_features, heads, r_range)
             for _ in range(depth)
         ])
 
@@ -211,18 +238,20 @@ class MoPeAModel(nn.Module):
         x = self.in_linear(x)
         x = self.layer_norm1(x)
 
-        A = []
-        B = []
+        C_kk = []
+        C_vk = []
+        C_vv = []
         for block in self.blocks:
-            x, block_A, block_B, mem_loss = block(x)
-            A.append(block_A)
-            B.append(block_B)
+            x, block_C_kk, block_C_vk, block_C_vv, mem_loss = block(x)
+            C_kk.append(block_C_kk)
+            C_vk.append(block_C_vk)
+            C_vv.append(block_C_vv)
         
         x = self.layer_norm2(x)
         y = self.out_linear(x)
         y = stable_max(y)
 
-        return y, A, B, mem_loss
+        return y, C_kk, C_vk, C_vv, mem_loss
         
 
 if __name__ == "__main__":
@@ -234,13 +263,13 @@ if __name__ == "__main__":
     print(f"LerpLinear\n\toutput shape: {qkv.shape}\n")
 
     mopea = MoPeAttention(8, 4)
-    y, A, B = mopea(x)
-    print(f"MoPeAttention\n\toutput shape: {y.shape}\n\tA shape: {A.shape}\n\tB shape: {B.shape}\n")
+    y, C_kk, C_vk, C_vv, mem_loss = mopea(x)
+    print(f"MoPeAttention\n\toutput shape: {y.shape}\n\tC_kk shape: {C_kk.shape}\n\tC_vk shape: {C_vk.shape}\n\tC_vv shape: {C_vv.shape}\n")
     
     block = Block(8, 4)
-    y, A, B = block(x)
-    print(f"Block\n\toutput shape: {y.shape}\n\tA shape: {A.shape}\n\tB shape: {B.shape}\n")
+    y, C_kk, C_vk, C_vv, mem_loss = block(x)
+    print(f"Block\n\toutput shape: {y.shape}\n\tC_kk shape: {C_kk.shape}\n\tC_vk shape: {C_vk.shape}\n\tC_vv shape: {C_vv.shape}\n")
 
     mopea_model = MoPeAModel(8, 16, 8, 4, depth=2)
-    y, A, B = mopea_model(x)
+    y, C_kk, C_vk, C_vv, mem_loss = mopea_model(x)
     print(f"MoPeA Model\n\toutput shape: {y.shape}\n")
