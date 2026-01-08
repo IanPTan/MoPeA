@@ -15,7 +15,7 @@ from torch import nn
 
 def mean_trace(tensor):
     diagonal = pt.diagonal(tensor, dim1=-2, dim2=-1)
-    traces = pt.sum(diagonal, dim=-1)
+    traces = pt.mean(diagonal, dim=-1)
     return traces.mean()
 
 
@@ -88,7 +88,10 @@ def get_mem(k, v, r, last_C_kk=0, last_C_vk=0, last_C_vv=0):
     # k = B_out_features
     # l = common
     # m = A_in_features
-    memory = pt.einsum("ijkl, ijlm -> ijkm", C_vk, pt.linalg.inv(C_kk))
+    #memory = pt.einsum("ijkl, ijlm -> ijkm", C_vk, pt.linalg.inv(C_kk))
+    # Add jitter to C_kk to ensure invertibility and stability
+    jitter = pt.eye(C_kk.shape[-1], device=C_kk.device) * 1e-5
+    memory = pt.einsum("ijkl, ijlm -> ijkm", C_vk, pt.linalg.inv(C_kk + jitter))
     
     # i = batch
     # j = time
@@ -128,6 +131,43 @@ def get_qkva(q, k, v, m=0.1):
     # l = v features
     retrieved_v = pt.einsum("ijk, ikl -> ijl", attention_matrix, v)
     return retrieved_v
+
+
+def covmem_scan(all_dM, all_M_r):
+    last_M = 0
+    M = pt.zeros_like(all_dM)
+
+    for i in range(all_dM.shape[1]):
+        dM = all_dM[:, i]
+        M_r = all_M_r[:, i]
+
+        last_M = last_M * M_r + dM
+        
+        M[:, i] = last_M
+    
+    return M, last_M
+
+
+def get_covmem(q, k, v, r):
+    r_k, r_v = pt.split(r, r.shape[-1] // 2, dim=-1)
+
+    # i = batch
+    # j = time
+    # k = features_1
+    # l = features_2
+    dM = pt.einsum("ijk, ijl -> ijkl", r_v, r_k)
+    M_r = pt.einsum("ijk, ijl -> ijkl", v, k)
+    
+    M, last_M = covmem_scan(dM, M_r)
+    
+    # i = batch
+    # j = time
+    # k = memory cols
+    # l = memory rows
+    # m = value features
+    out_x = pt.einsum("ijkm, ijm -> ijk", M, q)
+
+    return out_x, M, last_M
 
 
 class LerpLinear(nn.Module):
@@ -180,15 +220,19 @@ class MoPeAttention(nn.Module):
         (r,) = self.r_layer(norm_curr_x, norm_last_x)
         r = self.r_scale(r)
         
-        mope_out_x, C_kk, C_vk, C_vv, mpi_loss = get_mopea(q, k, v, r, last_C_kk, last_C_vk, last_C_vv)
+        out_x, C_kk, C_vk, C_vv, mem_loss = get_mopea(q, k, v, r, last_C_kk, last_C_vk, last_C_vv)
         """
         qkv_out_x = get_qkva(q, k, v)
         mem_loss = pt.mean((mope_out_x - qkv_out_x) ** 2)
         out_x = qkv_out_x
         mem_loss = 0
-        """
+
         out_x = mope_out_x
         mem_loss = mpi_loss
+
+        out_x, M, last_M = get_covmem(q, k, v, r)
+        mem_loss = 0
+        """
 
         dx = self.out_linear(out_x)
         y = x + dx
