@@ -67,7 +67,7 @@ def mem_scan(all_dC_kk, all_dC_vk, all_dC_vv, all_R_kk, all_R_vk, all_R_vv, last
     return C_kk, C_vk, C_vv
 
 
-def get_mem(k, v, r, last_C_kk=0, last_C_vk=0, last_C_vv=0):
+def get_mem(k, v, r, last_C_kk=0, last_C_vk=0, last_C_vv=0, enable_jitter=1):
     r_k, r_v = pt.split(r, r.shape[-1] // 2, dim=-1)
 
     # i = batch
@@ -88,9 +88,8 @@ def get_mem(k, v, r, last_C_kk=0, last_C_vk=0, last_C_vv=0):
     # k = B_out_features
     # l = common
     # m = A_in_features
-    #memory = pt.einsum("ijkl, ijlm -> ijkm", C_vk, pt.linalg.inv(C_kk))
     # Add jitter to C_kk to ensure invertibility and stability
-    jitter = pt.eye(C_kk.shape[-1], device=C_kk.device) * 1e-5
+    jitter = pt.eye(C_kk.shape[-1], device=C_kk.device) * 1e-5 * enable_jitter
     memory = pt.einsum("ijkl, ijlm -> ijkm", C_vk, pt.linalg.inv(C_kk + jitter))
     
     # i = batch
@@ -104,8 +103,8 @@ def get_mem(k, v, r, last_C_kk=0, last_C_vk=0, last_C_vv=0):
     return memory, C_kk, C_vk, C_vv, mpi_loss
 
 
-def get_mopea(q, k, v, r, last_C_kk=0, last_C_vk=0, last_C_vv=0):
-    memory, C_kk, C_vk, C_vv, mpi_loss = get_mem(k, v, r, last_C_kk, last_C_vk, last_C_vv)
+def get_mopea(q, k, v, r, last_C_kk=0, last_C_vk=0, last_C_vv=0, enable_jitter=1):
+    memory, C_kk, C_vk, C_vv, mpi_loss = get_mem(k, v, r, last_C_kk, last_C_vk, last_C_vv, enable_jitter=enable_jitter)
     out_x = pt.einsum("ijkm, ijm -> ijk", memory, q)
     return out_x, C_kk, C_vk, C_vv, mpi_loss
 
@@ -196,11 +195,12 @@ class LerpLinear(nn.Module):
 
 
 class MoPeAttention(nn.Module):
-    def __init__(self, in_features, mem_features=None, heads=1, r_range=(0.1, 0.99)):
+    def __init__(self, in_features, mem_features=None, heads=1, r_range=(0.1, 0.99), enable_jitter=1):
         super().__init__()
         
         if mem_features is None:
             mem_features = in_features
+        self.enable_jitter = enable_jitter
         r_min, r_max = r_range
         self.r_scale = lambda x: r_min + (r_max - r_min) * x
 
@@ -220,7 +220,7 @@ class MoPeAttention(nn.Module):
         (r,) = self.r_layer(norm_curr_x, norm_last_x)
         r = self.r_scale(r)
         
-        out_x, C_kk, C_vk, C_vv, mem_loss = get_mopea(q, k, v, r, last_C_kk, last_C_vk, last_C_vv)
+        out_x, C_kk, C_vk, C_vv, mem_loss = get_mopea(q, k, v, r, last_C_kk, last_C_vk, last_C_vv, enable_jitter=self.enable_jitter)
         """
         qkv_out_x = get_qkva(q, k, v)
         mem_loss = pt.mean((mope_out_x - qkv_out_x) ** 2)
@@ -237,14 +237,14 @@ class MoPeAttention(nn.Module):
         dx = self.out_linear(out_x)
         y = x + dx
 
-        return y, C_kk[:, -1], C_vk[:, -1], C_vv[:, -1], mem_loss
+        return y, C_kk[:, -1], C_vk[:, -1], C_vv[:, -1], mem_loss, q, k, v
 
 
 class Block(nn.Module):
-    def __init__(self, in_features, mem_features=None, heads=1, r_range=(0.1, 0.99)):
+    def __init__(self, in_features, mem_features=None, heads=1, r_range=(0.1, 0.99), enable_jitter=1):
         super().__init__()
         
-        self.mopea_layer = MoPeAttention(in_features, mem_features, heads, r_range)
+        self.mopea_layer = MoPeAttention(in_features, mem_features, heads, r_range, enable_jitter=enable_jitter)
 
         self.linear_block = nn.Sequential(
             nn.LayerNorm(in_features),
@@ -255,16 +255,16 @@ class Block(nn.Module):
 
     def forward(self, x, last_x=0, last_C_kk=0, last_C_vk=0, last_C_vv=0):
         
-        x, C_kk, C_vk, C_vv, mem_loss = self.mopea_layer(x, last_x, last_C_kk, last_C_vk, last_C_vv)
+        x, C_kk, C_vk, C_vv, mem_loss, q, k, v = self.mopea_layer(x, last_x, last_C_kk, last_C_vk, last_C_vv)
 
         dx = self.linear_block(x)
         y = x + dx
         
-        return y, C_kk, C_vk, C_vv, mem_loss
+        return y, C_kk, C_vk, C_vv, mem_loss, q, k, v
 
 
 class MoPeAModel(nn.Module):
-    def __init__(self, in_features, mid_features, out_features, mem_features=None, heads=1, r_range=(0.1, 0.99), depth=1):
+    def __init__(self, in_features, mid_features, out_features, mem_features=None, heads=1, r_range=(0.1, 0.99), depth=1, enable_jitter=1):
         super().__init__()
 
         self.in_linear = nn.Linear(in_features, mid_features)
@@ -273,7 +273,7 @@ class MoPeAModel(nn.Module):
         self.out_linear = nn.Linear(mid_features, out_features)
 
         self.blocks = nn.ModuleList([
-            Block(mid_features, mem_features, heads, r_range)
+            Block(mid_features, mem_features, heads, r_range, enable_jitter=enable_jitter)
             for _ in range(depth)
         ])
 
@@ -285,17 +285,23 @@ class MoPeAModel(nn.Module):
         C_kk = []
         C_vk = []
         C_vv = []
+        Q = []
+        K = []
+        V = []
         for block in self.blocks:
-            x, block_C_kk, block_C_vk, block_C_vv, mem_loss = block(x)
+            x, block_C_kk, block_C_vk, block_C_vv, mem_loss, q, k, v = block(x)
             C_kk.append(block_C_kk)
             C_vk.append(block_C_vk)
             C_vv.append(block_C_vv)
+            Q.append(q)
+            K.append(k)
+            V.append(v)
         
         x = self.layer_norm2(x)
         y = self.out_linear(x)
         y = stable_max(y)
 
-        return y, C_kk, C_vk, C_vv, mem_loss
+        return y, C_kk, C_vk, C_vv, mem_loss, Q, K, V
         
 
 if __name__ == "__main__":
@@ -307,13 +313,13 @@ if __name__ == "__main__":
     print(f"LerpLinear\n\toutput shape: {qkv.shape}\n")
 
     mopea = MoPeAttention(8, 4)
-    y, C_kk, C_vk, C_vv, mem_loss = mopea(x)
-    print(f"MoPeAttention\n\toutput shape: {y.shape}\n\tC_kk shape: {C_kk.shape}\n\tC_vk shape: {C_vk.shape}\n\tC_vv shape: {C_vv.shape}\n")
+    y, C_kk, C_vk, C_vv, mem_loss, q, k, v = mopea(x)
+    print(f"MoPeAttention\n\toutput shape: {y.shape}\n\tC_kk shape: {C_kk.shape}\n\tC_vk shape: {C_vk.shape}\n\tC_vv shape: {C_vv.shape}\n\tq shape: {q.shape}\n\tk shape: {k.shape}\n\tv shape: {v.shape}\n")
     
     block = Block(8, 4)
-    y, C_kk, C_vk, C_vv, mem_loss = block(x)
-    print(f"Block\n\toutput shape: {y.shape}\n\tC_kk shape: {C_kk.shape}\n\tC_vk shape: {C_vk.shape}\n\tC_vv shape: {C_vv.shape}\n")
+    y, C_kk, C_vk, C_vv, mem_loss, q, k, v = block(x)
+    print(f"Block\n\toutput shape: {y.shape}\n\tC_kk shape: {C_kk.shape}\n\tC_vk shape: {C_vk.shape}\n\tC_vv shape: {C_vv.shape}\n\tq shape: {q.shape}\n\tk shape: {k.shape}\n\tv shape: {v.shape}\n")
 
     mopea_model = MoPeAModel(8, 16, 8, 4, depth=2)
-    y, C_kk, C_vk, C_vv, mem_loss = mopea_model(x)
+    y, C_kk, C_vk, C_vv, mem_loss, Q, K, V = mopea_model(x)
     print(f"MoPeA Model\n\toutput shape: {y.shape}\n")
