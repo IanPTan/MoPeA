@@ -220,10 +220,12 @@ class MoPeAttention(nn.Module):
         (r,) = self.r_layer(norm_curr_x, norm_last_x)
         r = self.r_scale(r)
         
+        #out_x, C_kk, C_vk, C_vv, mem_loss = get_mopea(q, k, v, r, last_C_kk, last_C_vk, last_C_vv, enable_jitter=self.enable_jitter)
         out_x, C_kk, C_vk, C_vv, mem_loss = get_mopea(q, k, v, r, last_C_kk, last_C_vk, last_C_vv, enable_jitter=self.enable_jitter)
+        #qkv_out_x = get_qkva(q, k, v)
+        #mem_loss = pt.mean((out_x - qkv_out_x) ** 2)
+
         """
-        qkv_out_x = get_qkva(q, k, v)
-        mem_loss = pt.mean((mope_out_x - qkv_out_x) ** 2)
         out_x = qkv_out_x
         mem_loss = 0
 
@@ -234,6 +236,8 @@ class MoPeAttention(nn.Module):
         mem_loss = 0
         """
 
+        #dx = self.out_linear(q)
+        #mem_loss *= 0
         dx = self.out_linear(out_x)
         y = x + dx
 
