@@ -15,3 +15,8 @@ dependencies = [
     "torchvision>=0.24.1",
     "tqdm>=4.67.1",
 ]
+
+[dependency-groups]
+dev = [
+    "jupyterlab>=4.5.2",
+]
