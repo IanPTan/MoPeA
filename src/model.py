@@ -44,10 +44,13 @@ def add_last_x(x, last_x=0):
 
 def global_cos_loss(C_kk, C_vk, C_vv, memory, eps=1e-8):
     alignment = pt.einsum('btvk, btvk -> bt', memory, C_vk)
-    pred_energy = pt.einsum('btvk, btkl, btvl -> bt', memory, C_kk, memory)
-    target_energy = pt.einsum('btvv -> bt', C_vv)
+    pred_energy = pt.einsum('btvk, btkl, btvl -> bt', memory, C_kk, memory).abs()
+    target_energy = pt.einsum('btvv -> bt', C_vv).abs()
     score = alignment / (pt.sqrt(pred_energy * target_energy) + eps)
     
+    #print("bruh", (pred_energy < 0).any(), (target_energy < 0).any(), pt.sqrt(pred_energy * target_energy).isnan().any())
+    print("bruh", score.isnan().any())
+   
     return -score.mean()
 
 
