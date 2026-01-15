@@ -42,6 +42,15 @@ def add_last_x(x, last_x=0):
     return cat_x
 
 
+def global_cos_loss(C_kk, C_vk, C_vv, memory, eps=1e-8):
+    alignment = pt.einsum('btvk, btvk -> bt', memory, C_vk)
+    pred_energy = pt.einsum('btvk, btkl, btvl -> bt', memory, C_kk, memory)
+    target_energy = pt.einsum('btvv -> bt', C_vv)
+    score = alignment / (pt.sqrt(pred_energy * target_energy) + eps)
+    
+    return -score.mean()
+
+
 def mem_scan(all_dC_kk, all_dC_vk, all_dC_vv, all_R_kk, all_R_vk, all_R_vv, last_C_kk=0, last_C_vk=0, last_C_vv=0):
     C_kk = pt.zeros_like(all_dC_kk)
     C_vk = pt.zeros_like(all_dC_vk)
@@ -92,6 +101,7 @@ def get_mem(k, v, r, last_C_kk=0, last_C_vk=0, last_C_vv=0, enable_jitter=1):
     jitter = pt.eye(C_kk.shape[-1], device=C_kk.device) * 1e-5 * enable_jitter
     memory = pt.einsum("ijkl, ijlm -> ijkm", C_vk, pt.linalg.inv(C_kk + jitter))
     
+    """
     # i = batch
     # j = time
     # k = memory cols
@@ -99,7 +109,10 @@ def get_mem(k, v, r, last_C_kk=0, last_C_vk=0, last_C_vv=0, enable_jitter=1):
     # m = value features
     mpi_loss = pt.abs(mean_trace(C_vv - pt.einsum("ijkl, ijml -> ijkm", memory, C_vk)))
     #mpi_loss = sum_trace(C_vv) - 2 * sum_trace(pt.einsum("ijkl, ijmn -> ijkm", memory, C_vk)) + sum_trace(pt.einsum("ijkl, ijlm, ijnm -> ij", memory, C_kk, memory))
-    
+    """
+    mpi_loss = global_cos_loss(C_kk, C_vk, C_vv, memory)
+
+
     return memory, C_kk, C_vk, C_vv, mpi_loss
 
 
@@ -292,11 +305,13 @@ class MoPeAModel(nn.Module):
         Q = []
         K = []
         V = []
+        mem_loss = 0
         for block in self.blocks:
-            x, block_C_kk, block_C_vk, block_C_vv, mem_loss, q, k, v = block(x)
+            x, block_C_kk, block_C_vk, block_C_vv, block_mem_loss, q, k, v = block(x)
             C_kk.append(block_C_kk)
             C_vk.append(block_C_vk)
             C_vv.append(block_C_vv)
+            mem_loss += block_mem_loss
             Q.append(q)
             K.append(k)
             V.append(v)
@@ -304,6 +319,8 @@ class MoPeAModel(nn.Module):
         x = self.layer_norm2(x)
         y = self.out_linear(x)
         y = stable_max(y)
+        
+        mem_loss /= len(self.blocks)
 
         return y, C_kk, C_vk, C_vv, mem_loss, Q, K, V
         
