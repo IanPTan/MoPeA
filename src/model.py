@@ -49,7 +49,7 @@ def global_cos_loss(C_kk, C_vk, C_vv, memory, eps=1e-8):
     score = alignment / (pt.sqrt(pred_energy * target_energy) + eps)
     
     #print("bruh", (pred_energy < 0).any(), (target_energy < 0).any(), pt.sqrt(pred_energy * target_energy).isnan().any())
-    print("bruh", score.isnan().any())
+    #print("bruh", score.isnan().any())
    
     return -score.mean()
 
