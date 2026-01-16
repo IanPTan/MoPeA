@@ -44,12 +44,19 @@ def add_last_x(x, last_x=0):
 
 def global_cos_loss(C_kk, C_vk, C_vv, memory, eps=1e-8):
     alignment = pt.einsum('btvk, btvk -> bt', memory, C_vk)
-    pred_energy = pt.einsum('btvk, btkl, btvl -> bt', memory, C_kk, memory).abs()
-    target_energy = pt.einsum('btvv -> bt', C_vv).abs()
+    pred_energy = pt.einsum('btvk, btkl, btvl -> bt', memory, C_kk, memory)
+    target_energy = pt.einsum('btvv -> bt', C_vv)
     score = alignment / (pt.sqrt(pred_energy * target_energy) + eps)
     
-    #print("bruh", (pred_energy < 0).any(), (target_energy < 0).any(), pt.sqrt(pred_energy * target_energy).isnan().any())
-    #print("bruh", score.isnan().any())
+    """
+    print("pred energy neg:", (pred_energy < 0).any())
+    print("target energy neg:" , (target_energy < 0).any())
+    print("denom nan:", pt.sqrt(pred_energy * target_energy).isnan().any())
+    print("denom zero:", (pt.sqrt(pred_energy * target_energy) == 0).any())
+    print("score nan:", score.isnan().any())
+    print("score mean nan:", score.mean().isnan().any())
+    #print(C_vv[C_vv.diagonal(dim1=-2, dim2=-1) < 0])
+    """
    
     return -score.mean()
 
@@ -68,9 +75,17 @@ def mem_scan(all_dC_kk, all_dC_vk, all_dC_vv, all_R_kk, all_R_vk, all_R_vv, last
         R_vv = all_R_vv[:, i]
         #R = 1  # temporarily let's ignore R for now
 
+        """
         last_C_kk = last_C_kk + (dC_kk - last_C_kk) * R_kk
         last_C_vk = last_C_vk + (dC_vk - last_C_vk) * R_vk
         last_C_vv = last_C_vv + (dC_vv - last_C_vv) * R_vv
+        last_C_kk = last_C_kk * R_kk + dC_kk
+        last_C_vk = last_C_vk * R_vk + dC_vk
+        last_C_vv = last_C_vv * R_vv + dC_vv
+        """
+        last_C_kk = last_C_kk + dC_kk
+        last_C_vk = last_C_vk + dC_vk
+        last_C_vv = last_C_vv + dC_vv
         
         C_kk[:, i] = last_C_kk
         C_vk[:, i] = last_C_vk
@@ -93,6 +108,14 @@ def get_mem(k, v, r, last_C_kk=0, last_C_vk=0, last_C_vv=0, enable_jitter=1):
     R_vk = pt.einsum("ijk, ijl -> ijkl", r_v, r_k)
     R_vv = pt.einsum("ijk, ijl -> ijkl", r_v, r_v)
     
+    """
+    print("R_kk in [0, 1]:", ((R_kk >= 0) & (R_kk <= 1)).all())
+    print("R_vk in [0, 1]:", ((R_vk >= 0) & (R_vk <= 1)).all())
+    print("R_vv in [0, 1]:", ((R_vv >= 0) & (R_vv <= 1)).all())
+    print("dC_kk diag pos:", (pt.diagonal(dC_kk, dim1=-2, dim2=-1) > 0).all())
+    print("dC_vv diag pos:", (pt.diagonal(dC_vv, dim1=-2, dim2=-1) > 0).all())
+    """ 
+
     C_kk, C_vk, C_vv = mem_scan(dC_kk, dC_vk, dC_vv, R_kk, R_vk, R_vv, last_C_kk, last_C_vk, last_C_vv)
 
     # i = batch
@@ -114,6 +137,7 @@ def get_mem(k, v, r, last_C_kk=0, last_C_vk=0, last_C_vv=0, enable_jitter=1):
     #mpi_loss = sum_trace(C_vv) - 2 * sum_trace(pt.einsum("ijkl, ijmn -> ijkm", memory, C_vk)) + sum_trace(pt.einsum("ijkl, ijlm, ijnm -> ij", memory, C_kk, memory))
     """
     mpi_loss = global_cos_loss(C_kk, C_vk, C_vv, memory)
+    #print("GCL =", mpi_loss)
 
 
     return memory, C_kk, C_vk, C_vv, mpi_loss
@@ -218,7 +242,7 @@ class MoPeAttention(nn.Module):
             mem_features = in_features
         self.enable_jitter = enable_jitter
         r_min, r_max = r_range
-        self.r_scale = lambda x: r_min + (r_max - r_min) * x
+        self.r_scale = lambda x: r_min + (r_max - r_min) * nn.functional.sigmoid(x)
 
         self.layer_norm = nn.LayerNorm(in_features)
         self.qkv_layer = LerpLinear(in_features, mem_features, 3)
@@ -287,6 +311,7 @@ class MoPeAModel(nn.Module):
     def __init__(self, in_features, mid_features, out_features, mem_features=None, heads=1, r_range=(0.1, 0.99), depth=1, enable_jitter=1):
         super().__init__()
 
+        self.depth = depth
         self.in_linear = nn.Linear(in_features, mid_features)
         self.layer_norm1 = nn.LayerNorm(mid_features)
         self.layer_norm2 = nn.LayerNorm(mid_features)
@@ -323,7 +348,7 @@ class MoPeAModel(nn.Module):
         y = self.out_linear(x)
         y = stable_max(y)
         
-        mem_loss /= len(self.blocks)
+        mem_loss /= self.depth
 
         return y, C_kk, C_vk, C_vv, mem_loss, Q, K, V
         
