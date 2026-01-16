@@ -58,7 +58,7 @@ def global_cos_loss(C_kk, C_vk, C_vv, memory, eps=1e-8):
     #print(C_vv[C_vv.diagonal(dim1=-2, dim2=-1) < 0])
     """
    
-    return -score.mean()
+    return 1 - score.mean()
 
 
 def mem_scan(all_dC_kk, all_dC_vk, all_dC_vv, all_R_kk, all_R_vk, all_R_vv, last_C_kk=0, last_C_vk=0, last_C_vv=0):
