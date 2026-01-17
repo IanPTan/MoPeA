@@ -20,8 +20,8 @@ def mean_trace(tensor):
 
 
 def sum_trace(tensor):
-    diagonal = pt.diagonal(tensor, dim1=-2, dim2=-1)
-    return diagonal.sum()
+    traces = pt.einsum("ijkk -> ijk", tensor)
+    return traces.mean()
 
 
 def s(x):
@@ -86,7 +86,7 @@ def mem_scan(all_dC_kk, all_dC_vk, all_dC_vv, all_R_kk, all_R_vk, all_R_vv, last
         last_C_kk = last_C_kk + dC_kk
         last_C_vk = last_C_vk + dC_vk
         last_C_vv = last_C_vv + dC_vv
-        
+       
         C_kk[:, i] = last_C_kk
         C_vk[:, i] = last_C_vk
         C_vv[:, i] = last_C_vv
@@ -127,18 +127,18 @@ def get_mem(k, v, r, last_C_kk=0, last_C_vk=0, last_C_vv=0, enable_jitter=1):
     jitter = pt.eye(C_kk.shape[-1], device=C_kk.device) * 1e-5 * enable_jitter
     memory = pt.einsum("ijkl, ijlm -> ijkm", C_vk, pt.linalg.inv(C_kk + jitter))
     
-    """
     # i = batch
     # j = time
     # k = memory cols
     # l = memory rows
     # m = value features
-    mpi_loss = pt.abs(mean_trace(C_vv - pt.einsum("ijkl, ijml -> ijkm", memory, C_vk)))
-    #mpi_loss = sum_trace(C_vv) - 2 * sum_trace(pt.einsum("ijkl, ijmn -> ijkm", memory, C_vk)) + sum_trace(pt.einsum("ijkl, ijlm, ijnm -> ij", memory, C_kk, memory))
+    mpi_loss = sum_trace(C_vv - pt.einsum("ijkl, ijml -> ijkm", memory, C_vk)).abs().sqrt()
     """
+    mpi_loss = pt.abs(mean_trace(C_vv - pt.einsum("ijkl, ijml -> ijkm", memory, C_vk)))
+    mpi_loss = sum_trace(C_vv) - 2 * sum_trace(pt.einsum("ijkl, ijmn -> ijkm", memory, C_vk)) + sum_trace(pt.einsum("ijkl, ijlm, ijnm -> ij", memory, C_kk, memory))
     mpi_loss = global_cos_loss(C_kk, C_vk, C_vv, memory)
     #print("GCL =", mpi_loss)
-
+    """
 
     return memory, C_kk, C_vk, C_vv, mpi_loss
 
