@@ -127,13 +127,23 @@ def get_mem(k, v, r, last_C_kk=0, last_C_vk=0, last_C_vv=0, enable_jitter=1):
     jitter = pt.eye(C_kk.shape[-1], device=C_kk.device) * 1e-5 * enable_jitter
     memory = pt.einsum("ijkl, ijlm -> ijkm", C_vk, pt.linalg.inv(C_kk + jitter))
     
+    # Calculate detached versions for mpi_loss to only adjust v
+    dC_vk_det = pt.einsum("ijk, ijl -> ijkl", v.detach(), k)
+    dummy_zeros = pt.zeros_like(dC_kk)
+    last_C_vk_det = last_C_vk.detach() if isinstance(last_C_vk, pt.Tensor) else last_C_vk
+
+    _, C_vk_det, _ = mem_scan(dummy_zeros, dC_vk_det, dummy_zeros, R_kk, R_vk, R_vv, 0, last_C_vk_det, 0)
+
+    memory_det = pt.einsum("ijkl, ijlm -> ijkm", C_vk_det, pt.linalg.inv(C_kk.detach() + jitter))
+
+    mpi_loss = sum_trace(C_vv - pt.einsum("ijkl, ijml -> ijkm", memory_det, C_vk_det)).abs().sqrt()
+    """
     # i = batch
     # j = time
     # k = memory cols
     # l = memory rows
     # m = value features
     mpi_loss = sum_trace(C_vv - pt.einsum("ijkl, ijml -> ijkm", memory, C_vk)).abs().sqrt()
-    """
     mpi_loss = pt.abs(mean_trace(C_vv - pt.einsum("ijkl, ijml -> ijkm", memory, C_vk)))
     mpi_loss = sum_trace(C_vv) - 2 * sum_trace(pt.einsum("ijkl, ijmn -> ijkm", memory, C_vk)) + sum_trace(pt.einsum("ijkl, ijlm, ijnm -> ij", memory, C_kk, memory))
     mpi_loss = global_cos_loss(C_kk, C_vk, C_vv, memory)
